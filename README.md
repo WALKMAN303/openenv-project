@@ -1,17 +1,3 @@
----
-title: SQL Repair Environment
-emoji: 🔧
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
-tags:
-  - openenv
-  - reinforcement-learning
-  - sql
-  - developer-tools
----
-
 # SQL Repair Environment
 
 An OpenEnv environment where an AI agent learns to fix broken SQL queries.
@@ -24,13 +10,9 @@ the most common real-world SQL bug categories.
 
 ## Motivation
 
-SQL bugs are common in production codebases. A capable AI agent that can
-identify and fix common query errors such as syntax mistakes, wrong JOIN logic,
-and incorrect aggregations would have immediate real-world value for developer
-tools, IDEs, and automated code review systems.
+SQL bugs are common in production codebases. A capable AI agent that can identify and fix common query errors, such as syntax mistakes, wrong JOIN logic, and incorrect aggregations, would have immediate real-world value for the developer tools, IDEs, and automated code review systems.
 
-This environment provides a controlled, reproducible setting to train and
-evaluate such agents.
+This environment provides a controlled, reproducible setting to train and evaluate such agents.
 
 ---
 
