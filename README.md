@@ -178,5 +178,4 @@ Random (no fix)         | 0.30 | 0.30   | 0.30 | 0.30
 ## Links
 
 - OpenEnv GitHub: https://github.com/meta-pytorch/OpenEnv
-- OpenEnv Environment Hub: https://huggingface.co/collections/openenv/environment-hub
-- API Docs: https://WALKMAN303-sql-repair-env.hf.space/docs
+- Hugging Face Environment Hub: https://huggingface.co/open-env-project
