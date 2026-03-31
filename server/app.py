@@ -1,39 +1,55 @@
-"""
-server/app.py — FastAPI server for the SQL Repair Environment.
-"""
 
 import os
 import sys
-from fastapi.responses import JSONResponse
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from openenv.core.env_server import create_fastapi_app
 from models import SQLAction, SQLObservation
-from server.environment import SQLRepairEnvironment, TASKS, run_query, grade_submission, create_db
+from server.environment import SQLRepairEnvironment, TASKS
 
 # Auto-creates /reset /step /state /health /ws /docs
 app = create_fastapi_app(SQLRepairEnvironment, SQLAction, SQLObservation)
 
 
+# Root endpoint - HF Spaces needs this to confirm app is running
+@app.get("/")
+def root():
+    return JSONResponse(content={
+        "name":        "SQL Repair Environment",
+        "version":     "1.0.0",
+        "status":      "running",
+        "description": "OpenEnv environment for AI agents to fix broken SQL queries",
+        "endpoints": {
+            "health":   "/health",
+            "docs":     "/docs",
+            "tasks":    "/tasks",
+            "grader":   "/grader",
+            "baseline": "/baseline",
+            "reset":    "/reset",
+            "step":     "/step",
+            "state":    "/state",
+        }
+    })
+
+
 @app.get("/tasks", tags=["Competition"])
 def get_tasks():
     """List all available tasks and their action schema."""
-    return JSONResponse(
-        content={
-            "tasks": SQLRepairEnvironment.list_tasks(),
-            "total": len(TASKS),
-            "action_schema": {
-                "sql_query":   "string — The fixed SQL query to submit",
-                "explanation": "string (optional) — Agent's reasoning",
-            },
-        }
-    )
+    return JSONResponse(content={
+        "tasks": SQLRepairEnvironment.list_tasks(),
+        "total": len(TASKS),
+        "action_schema": {
+            "sql_query":   "string - The fixed SQL query to submit",
+            "explanation": "string (optional) - Agent reasoning",
+        },
+    })
 
 
 @app.post("/grader", tags=["Competition"])
 def run_grader(task_id: str, sql_query: str):
-    """Score a SQL query against a task. Returns score 0.0–1.0."""
+    """Score a SQL query against a task. Returns score 0.0-1.0."""
     result = SQLRepairEnvironment.run_grader(task_id, sql_query)
     return JSONResponse(content=result)
 
@@ -50,10 +66,8 @@ def run_baseline():
             "feedback": result["feedback"],
         }
     avg = sum(v["score"] for v in baseline_scores.values()) / len(baseline_scores)
-    return JSONResponse(
-        content={
-            "baseline_agent":  "oracle (submits known correct query)",
-            "results":         baseline_scores,
-            "average_score":   round(avg, 4),
-        }
-    )
+    return JSONResponse(content={
+        "baseline_agent":  "oracle (submits known correct query)",
+        "results":         baseline_scores,
+        "average_score":   round(avg, 4),
+    })
