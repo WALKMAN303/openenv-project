@@ -1,179 +1,183 @@
 """
-inference.py — SQL Repair Environment agent using required [START]/[STEP]/[END] stdout format.
+inference.py — Baseline LLM agent for the SQL Repair Environment.
 
 Required env vars:
-    API_BASE_URL      LLM API endpoint  (default: https://api.groq.com/openai/v1)
-    MODEL_NAME        Model identifier  (default: llama-3.1-8b-instant)
-    HF_TOKEN          Hugging Face / API key
-    SPACE_URL         Running environment URL (default: http://localhost:7860)
-    LOCAL_IMAGE_NAME  Docker image name if using from_docker_image() (optional)
+    API_BASE_URL   The API endpoint for the LLM (OpenAI-compatible)
+    MODEL_NAME     The model identifier to use for inference
+    HF_TOKEN       Your Hugging Face / API key
+
+Usage:
+    python inference.py
+    python inference.py --url https://WALKMAN303-sql-repair-env.hf.space
 """
 
 import os
-import sys
-from typing import List, Optional
-
-ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
-
-# ── Required environment variables ────────────────────────────────────────────
-API_BASE_URL     = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-MODEL_NAME       = os.getenv("MODEL_NAME",   "llama-3.1-8b-instant")
-HF_TOKEN         = os.getenv("HF_TOKEN")
-SPACE_URL        = os.getenv("SPACE_URL", "http://localhost:7860")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-
-BENCHMARK = "sql-repair-env"
-
+import json
+import time
+import argparse
+import requests
 from openai import OpenAI
-from client import SQLRepairEnv
-from models import SQLAction
 
-# ── OpenAI client ──────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
+ENV_URL     = os.environ.get("ENV_URL", "https://WALKMAN303-sql-repair-env.hf.space")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME  = os.environ.get("MODEL_NAME", "llama3-8b-8192")
+HF_TOKEN    = os.environ.get("HF_TOKEN", "")
+
+TASKS       = ["easy", "medium", "hard"]
+MAX_STEPS   = 5
+
+# ── OpenAI-compatible client ──────────────────────────────────────────────────
 client = OpenAI(
-    api_key=HF_TOKEN or os.getenv("OPENAI_API_KEY", ""),
     base_url=API_BASE_URL,
+    api_key=HF_TOKEN or "dummy",
 )
 
-SYSTEM_PROMPT = """You are an expert SQL developer who fixes broken SQL queries.
-Return ONLY the corrected SQL query. No explanation, no markdown, no code blocks.
-
-Common bugs:
-- Misspelled keywords: SELCT->SELECT, FORM->FROM, WERE->WHERE, ORDR->ORDER
-- Wrong JOIN columns: check which columns link which tables
-- WHERE vs HAVING: use HAVING with aggregate functions like AVG(), COUNT()
-"""
-
-
-# ── Required stdout helpers ────────────────────────────────────────────────────
-
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
-
-
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    # Inline the action on one line — strip newlines so the line stays single
-    action_inline = action.replace("\n", " ").replace("\r", "")
-    error_val = error if error else "null"
-    done_val = str(done).lower()
-    print(
-        f"[STEP] step={step} action={action_inline} reward={reward:.2f} done={done_val} error={error_val}",
-        flush=True,
+# ── Helper: call LLM ──────────────────────────────────────────────────────────
+def llm_fix_sql(broken_query: str, db_schema: str, task_description: str,
+                error_message: str, feedback: str, hint: str) -> str:
+    """Ask the LLM to repair a broken SQL query. Returns the fixed SQL string."""
+    system_prompt = (
+        "You are an expert SQL debugger. "
+        "Your job is to fix the broken SQL query provided by the user. "
+        "Return ONLY the corrected SQL query — no markdown, no explanation, "
+        "no code fences. Just the raw SQL."
     )
 
+    hint_section = f"\nHint: {hint}" if hint else ""
+    feedback_section = f"\nPrevious feedback: {feedback}" if feedback else ""
+    error_section = f"\nExecution error: {error_message}" if error_message else ""
 
-def log_end(task: str, success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(
-        f"[END] task={task} success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
-        flush=True,
+    user_prompt = (
+        f"Task: {task_description}\n\n"
+        f"Database schema:\n{db_schema}\n\n"
+        f"Broken SQL:\n{broken_query}"
+        f"{error_section}"
+        f"{feedback_section}"
+        f"{hint_section}\n\n"
+        "Return ONLY the fixed SQL query."
     )
 
-
-# ── Prompt builder ────────────────────────────────────────────────────────────
-
-def build_prompt(observation) -> str:
-    parts = [
-        f"Task: {observation.task_description}",
-        "",
-        "Database Schema:",
-        observation.db_schema,
-        "",
-        "Broken Query:",
-        observation.broken_query,
-    ]
-    if observation.error_message:
-        parts += ["", f"Error: {observation.error_message}"]
-    if observation.feedback and observation.attempt_number > 0:
-        parts += ["", f"Grader feedback: {observation.feedback}"]
-    if observation.hint:
-        parts += ["", f"Hint: {observation.hint}"]
-    parts += ["", "Return ONLY the fixed SQL query:"]
-    return "\n".join(parts)
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=512,
+    )
+    return response.choices[0].message.content.strip()
 
 
-# ── Single-task episode ───────────────────────────────────────────────────────
+# ── Helper: env HTTP calls ────────────────────────────────────────────────────
+def env_reset(base_url: str, task_id: str) -> dict:
+    resp = requests.post(f"{base_url}/reset", json={"task_id": task_id}, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
-def run_task(env, task_id: str) -> float:
-    """Run one episode; emit [START]/[STEP]/[END] lines; return final score."""
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
-
-    try:
-        result = env.reset(task_id=task_id)
-        obs = result.observation
-
-        while not result.done:
-            steps_taken += 1
-            prompt = build_prompt(obs)
-
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=500,
-            )
-
-            fixed_query = response.choices[0].message.content.strip()
-            fixed_query = fixed_query.replace("```sql", "").replace("```", "").strip()
-
-            result = env.step(SQLAction(sql_query=fixed_query))
-            obs = result.observation
-
-            reward = result.reward or 0.0
-            rewards.append(reward)
-
-            error_msg = obs.error_message if obs.error_message else None
-            log_step(
-                step=steps_taken,
-                action=fixed_query,
-                reward=reward,
-                done=result.done,
-                error=error_msg,
-            )
-
-        score = rewards[-1] if rewards else 0.0
-        success = score >= 0.99
-
-    finally:
-        log_end(task=task_id, success=success, steps=steps_taken, score=score, rewards=rewards)
-
-    return score
+def env_step(base_url: str, sql_query: str, explanation: str = "") -> dict:
+    resp = requests.post(
+        f"{base_url}/step",
+        json={"sql_query": sql_query, "explanation": explanation},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main loop ─────────────────────────────────────────────────────────────────
+def run_task(base_url: str, task_id: str) -> float:
+    """Run one full episode for a task. Returns the final score."""
+
+    # Reset environment
+    reset_result = env_reset(base_url, task_id)
+    obs = reset_result.get("observation", reset_result)
+
+    episode_id   = reset_result.get("episode_id", "unknown")
+    broken_query = obs.get("broken_query", "")
+    db_schema    = obs.get("db_schema", "")
+    task_desc    = obs.get("task_description", "")
+
+    print(json.dumps({
+        "event":      "[START]",
+        "task_id":    task_id,
+        "episode_id": episode_id,
+        "broken_sql": broken_query,
+    }))
+
+    final_score  = 0.0
+    step_count   = 0
+
+    for step in range(1, MAX_STEPS + 1):
+        error_msg = obs.get("error_message", "")
+        feedback  = obs.get("feedback", "")
+        hint      = obs.get("hint", "")
+
+        # Ask LLM to fix
+        fixed_sql = llm_fix_sql(
+            broken_query=broken_query,
+            db_schema=db_schema,
+            task_description=task_desc,
+            error_message=error_msg,
+            feedback=feedback,
+            hint=hint,
+        )
+
+        # Submit to environment
+        step_result = env_step(base_url, fixed_sql, explanation="LLM fix")
+        obs         = step_result.get("observation", step_result)
+        reward      = step_result.get("reward", 0.0)
+        done        = step_result.get("done", False)
+        step_count  = step
+
+        print(json.dumps({
+            "event":     "[STEP]",
+            "task_id":   task_id,
+            "step":      step,
+            "sql":       fixed_sql,
+            "reward":    reward,
+            "done":      done,
+            "feedback":  obs.get("feedback", ""),
+        }))
+
+        final_score = reward
+        if done:
+            break
+
+    print(json.dumps({
+        "event":       "[END]",
+        "task_id":     task_id,
+        "episode_id":  episode_id,
+        "steps":       step_count,
+        "final_score": final_score,
+    }))
+
+    return final_score
+
 
 def main():
-    task_ids = ["easy", "medium", "hard"]
-    scores = {}
+    parser = argparse.ArgumentParser(description="SQL Repair Environment — LLM Baseline")
+    parser.add_argument("--url", default=ENV_URL, help="Base URL of the environment")
+    args = parser.parse_args()
 
-    with SQLRepairEnv(base_url=SPACE_URL).sync() as env:
-        for task_id in task_ids:
-            try:
-                scores[task_id] = run_task(env, task_id)
-            except Exception as exc:
-                # Still emit a valid [END] so the validator sees output
-                print(
-                    f"[END] task={task_id} success=false steps=0 score=0.01 rewards=0.01",
-                    flush=True,
-                )
-                print(f"[DEBUG] Exception on {task_id}: {exc}", flush=True, file=sys.stderr)
-                scores[task_id] = 0.01
+    base_url = args.url.rstrip("/")
+    scores   = {}
 
-    avg = sum(scores.values()) / len(scores) if scores else 0.0
-    print(
-        f"[SUMMARY] model={MODEL_NAME} easy={scores.get('easy', 0):.2f} "
-        f"medium={scores.get('medium', 0):.2f} hard={scores.get('hard', 0):.2f} "
-        f"average={avg:.2f}",
-        flush=True,
-    )
+    for task_id in TASKS:
+        try:
+            score = run_task(base_url, task_id)
+            scores[task_id] = score
+        except Exception as exc:
+            print(json.dumps({"event": "[ERROR]", "task_id": task_id, "error": str(exc)}))
+            scores[task_id] = 0.0
+        time.sleep(1)   # small pause between tasks
+
+    print(json.dumps({
+        "event":        "[SUMMARY]",
+        "scores":       scores,
+        "average":      round(sum(scores.values()) / len(scores), 4),
+    }))
 
 
 if __name__ == "__main__":
