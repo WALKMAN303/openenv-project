@@ -62,10 +62,10 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(task: str, success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] task={task} success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -140,10 +140,10 @@ def run_task(env, task_id: str) -> float:
             )
 
         score = rewards[-1] if rewards else 0.0
-        success = score >= 1.0
+        success = score >= 0.99
 
     finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(task=task_id, success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return score
 
@@ -161,11 +161,11 @@ def main():
             except Exception as exc:
                 # Still emit a valid [END] so the validator sees output
                 print(
-                    f"[END] success=false steps=0 score=0.00 rewards=",
+                    f"[END] task={task_id} success=false steps=0 score=0.01 rewards=0.01",
                     flush=True,
                 )
                 print(f"[DEBUG] Exception on {task_id}: {exc}", flush=True, file=sys.stderr)
-                scores[task_id] = 0.0
+                scores[task_id] = 0.01
 
     avg = sum(scores.values()) / len(scores) if scores else 0.0
     print(

@@ -317,6 +317,8 @@ def grade_submission(
             feedback_parts.append("❌ Row values do not match expected output.")
 
     score = min(1.0, round(score, 4))
+    # Validator requires score strictly between 0 and 1 (not 0.0, not 1.0)
+    score = max(0.01, min(0.99, score))
     return score, " | ".join(feedback_parts)
 
 
@@ -431,8 +433,8 @@ class SQLRepairEnvironment(Environment):
         self._state.last_score = score
 
         # Episode ends when solved or out of attempts
-        done = (score >= 1.0) or (self._attempt >= self.MAX_ATTEMPTS)
-        self._state.completed = score >= 1.0
+        done = (score >= 0.99) or (self._attempt >= self.MAX_ATTEMPTS)
+        self._state.completed = score >= 0.99
 
         # Reward shaping:
         #   - Intermediate steps: return current score (partial progress signal)
@@ -512,5 +514,5 @@ class SQLRepairEnvironment(Environment):
             "task_id":  task_id,
             "score":    score,
             "feedback": feedback,
-            "passed":   score >= 1.0,
+            "passed":   score >= 0.99,
         }
