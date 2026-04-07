@@ -11,17 +11,15 @@ from openenv.core.env_server import create_fastapi_app
 from models import SQLAction, SQLObservation
 from server.environment import SQLRepairEnvironment, TASKS
 
-# Auto-creates /reset /step /state /health /ws /docs
 app = create_fastapi_app(SQLRepairEnvironment, SQLAction, SQLObservation)
 
 
 @app.get("/")
 def root():
     return JSONResponse(content={
-        "name":        "SQL Repair Environment",
-        "version":     "1.0.0",
-        "status":      "running",
-        "description": "OpenEnv environment for AI agents to fix broken SQL queries",
+        "name":    "SQL Repair Environment",
+        "version": "1.0.0",
+        "status":  "running",
         "endpoints": {
             "health":   "/health",
             "docs":     "/docs",
@@ -69,11 +67,17 @@ def run_baseline():
 
 
 def main():
-    """Entry point for 'uv run server' command."""
+    """Entry point for 'uv run server' and [project.scripts] server."""
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
     host = os.environ.get("HOST", "0.0.0.0")
-    uvicorn.run("server.app:app", host=host, port=port, workers=4)
+    workers = int(os.environ.get("WORKERS", 4))
+    uvicorn.run(
+        "server.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+    )
 
 
 if __name__ == "__main__":
