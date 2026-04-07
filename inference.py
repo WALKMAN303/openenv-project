@@ -1,45 +1,43 @@
-"""
-inference.py - LLM Baseline Agent for SQL Repair Environment.
-Must be at repo root for openenv validation.
-
-Usage:
-    set OPENAI_API_KEY=gsk_your_groq_key_here
-    python inference.py --url https://WALKMAN303-sql-repair-env.hf.space
-"""
-
 import os
 import sys
-import argparse
 import json
 
-# Add paths so imports work from repo root
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "OpenEnv"))
-sys.path.insert(0, os.path.join(ROOT, "OpenEnv", "src"))
 
-try:
-    from openai import OpenAI
-except ImportError:
-    print("ERROR: openai not installed. Run: pip install openai")
-    sys.exit(1)
+# ── Required environment variables (as per submission checklist) ──────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME",   "llama-3.1-8b-instant")
+HF_TOKEN     = os.getenv("HF_TOKEN")
 
-try:
-    from client import SQLRepairEnv
-    from models import SQLAction
-except ImportError as e:
-    print(f"ERROR importing client/models: {e}")
-    sys.exit(1)
+# Optional - for from_docker_image()
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
+from openai import OpenAI
+from client import SQLRepairEnv
+from models import SQLAction
+
+# ── OpenAI client configured via environment variables ────────────────────────
+client = OpenAI(
+    api_key=HF_TOKEN or os.getenv("OPENAI_API_KEY", ""),
+    base_url=API_BASE_URL,
+)
 
 SYSTEM_PROMPT = """You are an expert SQL developer who fixes broken SQL queries.
-Return ONLY the corrected SQL query. No explanation, no markdown, no code blocks. Just raw SQL.
+Return ONLY the corrected SQL query. No explanation, no markdown, no code blocks.
 
-Common bugs to fix:
+Common bugs:
 - Misspelled keywords: SELCT->SELECT, FORM->FROM, WERE->WHERE, ORDR->ORDER
 - Wrong JOIN columns: check which columns link which tables
 - WHERE vs HAVING: use HAVING with aggregate functions like AVG(), COUNT()
 """
+
+ENV_URL = os.getenv("API_BASE_URL", "http://localhost:7860").replace(
+    "https://api.groq.com/openai/v1", "http://localhost:7860"
+)
+
+# Use a separate env URL variable
+SPACE_URL = os.getenv("SPACE_URL", "http://localhost:7860")
 
 
 def build_prompt(observation):
@@ -62,130 +60,79 @@ def build_prompt(observation):
     return "\n".join(parts)
 
 
-def run_episode(env, client, task_id, verbose=True):
-    if verbose:
-        print(f"\n{'─'*60}")
-        print(f"Task: {task_id.upper()}")
-        print(f"{'─'*60}")
+def run_task(env, task_id):
+    """Run one episode and return score."""
+    # START log
+    print(json.dumps({"type": "START", "task_id": task_id}))
 
     result = env.reset(task_id=task_id)
-    obs = result.observation
-
-    if verbose:
-        print(f"Broken query:\n{obs.broken_query}\n")
+    obs    = result.observation
+    step   = 0
 
     while not result.done:
+        step += 1
         prompt = build_prompt(obs)
 
-        try:
-            response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=500,
-            )
-            fixed_query = response.choices[0].message.content.strip()
-            fixed_query = fixed_query.replace("```sql", "").replace("```", "").strip()
-        except Exception as e:
-            print(f"LLM call failed: {e}")
-            fixed_query = obs.broken_query
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=500,
+        )
 
-        if verbose:
-            print(f"Attempt {obs.attempt_number + 1}: Submitting ->")
-            print(f"  {fixed_query[:100]}{'...' if len(fixed_query) > 100 else ''}")
+        fixed_query = response.choices[0].message.content.strip()
+        fixed_query = fixed_query.replace("```sql", "").replace("```", "").strip()
 
         result = env.step(SQLAction(sql_query=fixed_query))
-        obs = result.observation
+        obs    = result.observation
 
-        if verbose:
-            print(f"  Score: {result.reward:.4f} | Done: {result.done}")
-            if obs.feedback:
-                print(f"  Feedback: {obs.feedback[:120]}")
+        # STEP log
+        print(json.dumps({
+            "type":     "STEP",
+            "task_id":  task_id,
+            "step":     step,
+            "score":    result.reward,
+            "done":     result.done,
+            "feedback": obs.feedback,
+        }))
 
     final_score = result.reward or 0.0
-    if verbose:
-        status = "SOLVED" if final_score >= 1.0 else f"SCORE: {final_score:.4f}"
-        print(f"\n  Final result: {status}")
+
+    # END log
+    print(json.dumps({
+        "type":        "END",
+        "task_id":     task_id,
+        "final_score": final_score,
+        "passed":      final_score >= 1.0,
+    }))
 
     return final_score
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run LLM baseline agent on SQL Repair Environment"
-    )
-    parser.add_argument(
-        "--url",
-        default="http://localhost:7860",
-        help="Base URL of the environment"
-    )
-    parser.add_argument(
-        "--task",
-        choices=["easy", "medium", "hard", "all"],
-        default="all",
-        help="Which task to run"
-    )
-    parser.add_argument("--quiet", action="store_true")
-    args = parser.parse_args()
+    space_url = os.getenv("SPACE_URL", "http://localhost:7860")
+    task_ids  = ["easy", "medium", "hard"]
+    scores    = {}
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("\nERROR: OPENAI_API_KEY is not set!")
-        print("Run: set OPENAI_API_KEY=gsk_your_groq_key_here")
-        sys.exit(1)
-
-    print(f"API key found: {api_key[:8]}...")
-
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.groq.com/openai/v1"
-    )
-
-    task_ids = ["easy", "medium", "hard"] if args.task == "all" else [args.task]
-    verbose = not args.quiet
-
-    print(f"\n{'='*60}")
-    print(f"SQL Repair Environment - LLM Baseline (llama-3.1-8b-instant)")
-    print(f"Server: {args.url}")
-    print(f"Tasks:  {', '.join(task_ids)}")
-    print(f"{'='*60}")
-
-    scores = {}
-
-    with SQLRepairEnv(base_url=args.url).sync() as env:
+    with SQLRepairEnv(base_url=space_url).sync() as env:
         for task_id in task_ids:
             try:
-                score = run_episode(env, client, task_id, verbose=verbose)
-                scores[task_id] = score
+                scores[task_id] = run_task(env, task_id)
             except Exception as exc:
-                print(f"ERROR on task {task_id}: {exc}")
-                import traceback
-                traceback.print_exc()
+                print(json.dumps({"type": "ERROR", "task_id": task_id, "error": str(exc)}))
                 scores[task_id] = 0.0
 
-    print(f"\n{'='*60}")
-    print(f"BASELINE RESULTS")
-    print(f"{'='*60}")
-    for task_id, score in scores.items():
-        bar = "█" * int(score * 20)
-        status = "PASS" if score >= 1.0 else "FAIL"
-        print(f"  {task_id:8s}  [{bar:<20}]  {score:.4f}  {status}")
-
     avg = sum(scores.values()) / len(scores) if scores else 0.0
-    print(f"  {'─'*45}")
-    print(f"  Average: {avg:.4f}")
-    print(f"{'='*60}\n")
 
-    result_payload = {
-        "model": "llama-3.1-8b-instant",
-        "scores": scores,
+    print(json.dumps({
+        "type":          "SUMMARY",
+        "model":         MODEL_NAME,
+        "scores":        scores,
         "average_score": round(avg, 4),
-    }
-    print(json.dumps(result_payload, indent=2))
-    return scores
+    }))
 
 
 if __name__ == "__main__":
