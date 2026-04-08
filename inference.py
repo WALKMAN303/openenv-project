@@ -13,11 +13,14 @@ from openai import OpenAI
 from client import SQLRepairEnv
 from models import SQLAction
 
-# ── Read env vars (NOT at module level — inside main()) ───────────────────────
 HF_TOKEN         = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-SPACE_URL = os.getenv("SPACE_URL", "https://open-env-project-sql-repair-env.hf.space")
+# SPACE_URL — validator injects this pointing to our HF Space
+SPACE_URL = os.getenv(
+    "SPACE_URL",
+    "https://WALKMAN303-sql-repair-env.hf.space"
+)
 BENCHMARK = "sql-repair-env"
 TASK_IDS  = ["easy", "medium", "hard"]
 MAX_STEPS = 5
@@ -92,7 +95,6 @@ def run_task(env, client, model_name: str, task_id: str) -> float:
 
             prompt = build_prompt(obs)
 
-            # LLM call — NOT caught, must go through proxy
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -126,8 +128,6 @@ def run_task(env, client, model_name: str, task_id: str) -> float:
 
     except Exception as e:
         print(f"[DEBUG] Task error: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
         score   = 0.0
         success = False
 
@@ -138,8 +138,7 @@ def run_task(env, client, model_name: str, task_id: str) -> float:
 
 
 def main():
-    # ── Initialize everything inside main() ───────────────────────────────────
-    # Strict env var access — exactly as validator requires
+    # Strict env vars — exactly as validator requires
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
     model_name   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
@@ -148,9 +147,7 @@ def main():
     print(f"[DEBUG] MODEL_NAME={model_name}", flush=True)
     print(f"[DEBUG] SPACE_URL={SPACE_URL}", flush=True)
     print(f"[DEBUG] API_KEY present={bool(api_key)}", flush=True)
-    print(f"[DEBUG] API_KEY prefix={api_key[:8] if api_key else 'MISSING'}", flush=True)
 
-    # ── Client initialized inside main() after env vars confirmed ─────────────
     client = OpenAI(
         base_url=api_base_url,
         api_key=api_key,
@@ -158,16 +155,28 @@ def main():
 
     all_scores = {}
 
-    with SQLRepairEnv(base_url=SPACE_URL).sync() as env:
+    # Wrap environment connection in try/except
+    try:
+        env_client = SQLRepairEnv(base_url=SPACE_URL)
+        with env_client.sync() as env:
+            for task_id in TASK_IDS:
+                try:
+                    score = run_task(env, client, model_name, task_id)
+                except Exception as e:
+                    print(f"[DEBUG] Task {task_id} error: {e}", flush=True)
+                    log_start(task=task_id, env=BENCHMARK, model=model_name)
+                    log_end(success=False, steps=0, score=0.0, rewards=[0.0])
+                    score = 0.0
+                all_scores[task_id] = score
+
+    except Exception as e:
+        # WebSocket connection failed — still emit required output
+        print(f"[DEBUG] Connection error: {e}", flush=True)
         for task_id in TASK_IDS:
-            try:
-                score = run_task(env, client, model_name, task_id)
-            except Exception as e:
-                print(f"[DEBUG] Task {task_id} failed: {e}", flush=True)
+            if task_id not in all_scores:
                 log_start(task=task_id, env=BENCHMARK, model=model_name)
                 log_end(success=False, steps=0, score=0.0, rewards=[0.0])
-                score = 0.0
-            all_scores[task_id] = score
+                all_scores[task_id] = 0.0
 
     avg = sum(all_scores.values()) / len(all_scores) if all_scores else 0.0
     print(f"[SUMMARY] scores={all_scores} average={avg:.2f}", flush=True)
