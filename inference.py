@@ -122,13 +122,13 @@ def run_task(env, client, model_name: str, task_id: str) -> float:
             if done:
                 break
 
-        score   = max(rewards) if rewards else 0.0
-        score   = min(max(score, 0.0), 1.0)
-        success = score >= 1.0
+        score   = max(rewards) if rewards else 0.01
+        score   = min(max(score, 0.01), 0.99)
+        success = score >= 0.99
 
     except Exception as e:
         print(f"[DEBUG] Task error: {e}", flush=True)
-        score   = 0.0
+        score   = 0.01
         success = False
 
     finally:
@@ -165,8 +165,8 @@ def main():
                 except Exception as e:
                     print(f"[DEBUG] Task {task_id} error: {e}", flush=True)
                     log_start(task=task_id, env=BENCHMARK, model=model_name)
-                    log_end(success=False, steps=0, score=0.0, rewards=[0.0])
-                    score = 0.0
+                    log_end(success=False, steps=0, score=0.01, rewards=[0.01])
+                    score = 0.01
                 all_scores[task_id] = score
 
     except Exception as e:
@@ -175,7 +175,7 @@ def main():
         for task_id in TASK_IDS:
             if task_id not in all_scores:
                 log_start(task=task_id, env=BENCHMARK, model=model_name)
-                log_end(success=False, steps=0, score=0.0, rewards=[0.0])
+                log_end(success=False, steps=0, score=0.01, rewards=[0.01])
                 all_scores[task_id] = 0.0
 
     avg = sum(all_scores.values()) / len(all_scores) if all_scores else 0.0
