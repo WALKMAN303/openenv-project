@@ -5,39 +5,26 @@ server/app.py - FastAPI server for the SQL Repair Environment.
 import os
 import sys
 
-# Fix imports for both local and Docker environments
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "server"))
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from openenv.core.env_server import create_fastapi_app
-
-# Import models and environment using absolute paths
 from models import SQLAction, SQLObservation
 from server.environment import SQLRepairEnvironment, TASKS
 
-
 app = create_fastapi_app(SQLRepairEnvironment, SQLAction, SQLObservation)
 
+# ── read the UI HTML once at startup ─────────────────────────────────────────
+_UI_PATH = os.path.join(ROOT, "ui.html")
+with open(_UI_PATH, "r") as f:
+    _UI_HTML = f.read()
 
-@app.get("/")
+
+@app.get("/", response_class=HTMLResponse)
 def root():
-    return JSONResponse(content={
-        "name":    "SQL Repair Environment",
-        "version": "1.0.0",
-        "status":  "running",
-        "endpoints": {
-            "health":   "/health",
-            "docs":     "/docs",
-            "tasks":    "/tasks",
-            "grader":   "/grader",
-            "baseline": "/baseline",
-            "reset":    "/reset",
-            "step":     "/step",
-            "state":    "/state",
-        }
-    })
+    return HTMLResponse(content=_UI_HTML)
 
 
 @app.get("/tasks", tags=["Competition"])
@@ -77,7 +64,6 @@ def run_baseline():
 
 
 def main():
-    """Entry point for uv run server and project.scripts."""
     import uvicorn
     port    = int(os.environ.get("PORT", 7860))
     host    = os.environ.get("HOST", "0.0.0.0")
