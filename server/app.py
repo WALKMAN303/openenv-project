@@ -4,12 +4,19 @@ server/app.py - FastAPI server for the SQL Repair Environment.
 
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Fix imports for both local and Docker environments
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "server"))
 
 from fastapi.responses import JSONResponse
 from openenv.core.env_server import create_fastapi_app
+
+# Import models and environment using absolute paths
 from models import SQLAction, SQLObservation
 from server.environment import SQLRepairEnvironment, TASKS
+
 
 app = create_fastapi_app(SQLRepairEnvironment, SQLAction, SQLObservation)
 
@@ -26,6 +33,9 @@ def root():
             "tasks":    "/tasks",
             "grader":   "/grader",
             "baseline": "/baseline",
+            "reset":    "/reset",
+            "step":     "/step",
+            "state":    "/state",
         }
     })
 
@@ -67,17 +77,12 @@ def run_baseline():
 
 
 def main():
-    """Entry point for 'uv run server' and [project.scripts] server."""
+    """Entry point for uv run server and project.scripts."""
     import uvicorn
-    port = int(os.environ.get("PORT", 7860))
-    host = os.environ.get("HOST", "0.0.0.0")
+    port    = int(os.environ.get("PORT", 7860))
+    host    = os.environ.get("HOST", "0.0.0.0")
     workers = int(os.environ.get("WORKERS", 4))
-    uvicorn.run(
-        "server.app:app",
-        host=host,
-        port=port,
-        workers=workers,
-    )
+    uvicorn.run("server.app:app", host=host, port=port, workers=workers)
 
 
 if __name__ == "__main__":
