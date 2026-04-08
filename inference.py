@@ -1,6 +1,6 @@
 """
 inference.py - SQL Repair Environment Baseline Agent
-Must be at repo root. Uses validator-injected API_BASE_URL and API_KEY.
+Uses validator-injected API_BASE_URL and API_KEY with no fallbacks.
 """
 
 import os
@@ -14,11 +14,10 @@ from openai import OpenAI
 from client import SQLRepairEnv
 from models import SQLAction
 
-# ── Environment variables — injected by validator ─────────────────────────────
-# DO NOT hardcode or add fallback for API_KEY — must use validator's proxy
-API_BASE_URL     = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-MODEL_NAME       = os.getenv("MODEL_NAME",   "llama-3.1-8b-instant")
-API_KEY          = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
+# ── MUST use validator-injected variables — NO hardcoded fallbacks ────────────
+API_BASE_URL     = os.environ["API_BASE_URL"]
+API_KEY          = os.environ["API_KEY"]
+MODEL_NAME       = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
 HF_TOKEN         = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
@@ -42,8 +41,6 @@ Common bugs:
 - WHERE vs HAVING: use HAVING with aggregate functions like AVG(), COUNT()
 """
 
-
-# ── Required log functions ────────────────────────────────────────────────────
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
@@ -106,7 +103,6 @@ def run_task(env, task_id: str) -> float:
             prompt = build_prompt(obs)
 
             try:
-                # All LLM calls go through API_BASE_URL proxy
                 response = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[
