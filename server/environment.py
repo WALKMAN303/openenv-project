@@ -1,344 +1,519 @@
 """
-server/environment.py — Core SQL Repair Environment logic.
+server/environment.py — Core SQL Repair Environment Logic.
 
-FIX (Phase 2 compliance): All task scores are now clamped to the open
-interval (0.01, 0.99) so they are strictly between 0 and 1, as required
-by the OpenEnv evaluator.
+Contains:
+  - SQLite database schema + seed data
+  - 3 tasks: easy (syntax), medium (JOIN), hard (aggregation)
+  - Grader that gives partial-credit rewards 0.0–1.0
+  - SQLRepairEnvironment class implementing the OpenEnv interface
 """
 
 import sqlite3
 import uuid
-import re
-from typing import Optional
+import random
+from typing import Optional, Dict, List, Tuple, Any
+
+import os, sys
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from openenv.core.env_server import Environment
+from models import SQLAction, SQLObservation, SQLState
 
 
-# ── Score clamping ────────────────────────────────────────────────────────────
-# The OpenEnv evaluator requires: 0.0 < score < 1.0  (strictly).
-# Use this helper everywhere a score is returned.
-def _clamp(score: float, lo: float = 0.01, hi: float = 0.99) -> float:
-    """Clamp *score* to the open interval (lo, hi)."""
-    return max(lo, min(hi, float(score)))
+# ─── Database Schema ──────────────────────────────────────────────────────────
 
-
-# ── Task definitions ──────────────────────────────────────────────────────────
-TASKS = {
-    "easy": {
-        "task_id":          "easy",
-        "difficulty":       "easy",
-        "task_description": (
-            "Fix the broken SQL query that retrieves employee names, "
-            "departments, and salaries. The query contains misspelled keywords."
-        ),
-        "broken_query": (
-            "SELCT name, department, salary FORM employees WERE salary > 50000"
-        ),
-        "expected_query": (
-            "SELECT name, department, salary FROM employees WHERE salary > 50000"
-        ),
-        "expected_columns": {"name", "department", "salary"},
-    },
-    "medium": {
-        "task_id":          "medium",
-        "difficulty":       "medium",
-        "task_description": (
-            "Fix the broken SQL query that joins employees with departments "
-            "to get names and locations. The JOIN columns are swapped."
-        ),
-        "broken_query": (
-            "SELECT e.name, d.location "
-            "FROM employees e "
-            "JOIN departments d ON e.id = d.id"      # wrong: should be e.department = d.name (or similar)
-        ),
-        "expected_query": (
-            "SELECT e.name, d.location "
-            "FROM employees e "
-            "JOIN departments d ON e.department = d.name"
-        ),
-        "expected_columns": {"name", "location"},
-    },
-    "hard": {
-        "task_id":          "hard",
-        "difficulty":       "hard",
-        "task_description": (
-            "Fix the broken SQL query that finds departments whose average "
-            "salary exceeds 60000. The query incorrectly uses WHERE instead "
-            "of HAVING for the aggregate filter."
-        ),
-        "broken_query": (
-            "SELECT department, AVG(salary) AS avg_salary "
-            "FROM employees "
-            "WHERE AVG(salary) > 60000 "
-            "GROUP BY department"
-        ),
-        "expected_query": (
-            "SELECT department, AVG(salary) AS avg_salary "
-            "FROM employees "
-            "GROUP BY department "
-            "HAVING AVG(salary) > 60000"
-        ),
-        "expected_columns": {"department", "avg_salary"},
-    },
-}
-
-# ── In-memory DB seed ─────────────────────────────────────────────────────────
-_SEED_SQL = """
-CREATE TABLE employees (
-    id         INTEGER PRIMARY KEY,
-    name       TEXT,
-    department TEXT,
-    salary     REAL,
-    hire_date  TEXT
+DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS employees (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    department  TEXT    NOT NULL,
+    salary      REAL    NOT NULL,
+    hire_date   TEXT    NOT NULL
 );
-CREATE TABLE departments (
+
+CREATE TABLE IF NOT EXISTS departments (
     id       INTEGER PRIMARY KEY,
-    name     TEXT,
-    budget   REAL,
-    location TEXT
+    name     TEXT  NOT NULL,
+    budget   REAL  NOT NULL,
+    location TEXT  NOT NULL
 );
-CREATE TABLE projects (
+
+CREATE TABLE IF NOT EXISTS projects (
     id            INTEGER PRIMARY KEY,
-    name          TEXT,
-    department_id INTEGER,
-    budget        REAL,
-    status        TEXT
+    name          TEXT  NOT NULL,
+    department_id INTEGER NOT NULL,
+    budget        REAL  NOT NULL,
+    status        TEXT  NOT NULL
 );
-CREATE TABLE employee_projects (
-    employee_id  INTEGER,
-    project_id   INTEGER,
+
+CREATE TABLE IF NOT EXISTS employee_projects (
+    employee_id  INTEGER NOT NULL,
+    project_id   INTEGER NOT NULL,
     role         TEXT,
-    hours_worked REAL
+    hours_worked REAL DEFAULT 0,
+    PRIMARY KEY (employee_id, project_id)
 );
-
-INSERT INTO departments VALUES
-    (1, 'Engineering', 500000, 'San Francisco'),
-    (2, 'Marketing',   200000, 'New York'),
-    (3, 'HR',          100000, 'Chicago');
-
-INSERT INTO employees VALUES
-    (1, 'Alice',   'Engineering', 95000, '2019-03-01'),
-    (2, 'Bob',     'Engineering', 80000, '2020-06-15'),
-    (3, 'Carol',   'Marketing',   55000, '2018-01-10'),
-    (4, 'Dave',    'Marketing',   48000, '2021-09-01'),
-    (5, 'Eve',     'HR',          62000, '2017-07-20'),
-    (6, 'Frank',   'HR',          58000, '2022-02-28');
-
-INSERT INTO projects VALUES
-    (1, 'Alpha', 1, 120000, 'active'),
-    (2, 'Beta',  2,  60000, 'active'),
-    (3, 'Gamma', 3,  30000, 'closed');
-
-INSERT INTO employee_projects VALUES
-    (1, 1, 'lead',   200),
-    (2, 1, 'dev',    150),
-    (3, 2, 'lead',   100),
-    (4, 2, 'dev',     80),
-    (5, 3, 'lead',    60),
-    (6, 3, 'dev',     40);
 """
 
+DB_SEED = """
+INSERT INTO departments VALUES (1, 'Engineering', 500000, 'San Francisco');
+INSERT INTO departments VALUES (2, 'Marketing',   200000, 'New York');
+INSERT INTO departments VALUES (3, 'Finance',     300000, 'Chicago');
 
-def _make_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_SEED_SQL)
-    return conn
+INSERT INTO employees VALUES (1, 'Alice Johnson', 'Engineering', 95000,  '2020-01-15');
+INSERT INTO employees VALUES (2, 'Bob Smith',     'Engineering', 85000,  '2019-03-20');
+INSERT INTO employees VALUES (3, 'Carol White',   'Marketing',   72000,  '2021-06-01');
+INSERT INTO employees VALUES (4, 'David Brown',   'Finance',     88000,  '2018-11-10');
+INSERT INTO employees VALUES (5, 'Eve Davis',     'Engineering', 105000, '2017-07-22');
+INSERT INTO employees VALUES (6, 'Frank Miller',  'Marketing',   65000,  '2022-02-14');
+INSERT INTO employees VALUES (7, 'Grace Wilson',  'Finance',     92000,  '2019-09-30');
+INSERT INTO employees VALUES (8, 'Henry Moore',   'Engineering', 78000,  '2020-12-05');
 
+INSERT INTO projects VALUES (1, 'AI Platform',   1, 150000, 'active');
+INSERT INTO projects VALUES (2, 'Brand Refresh', 2,  80000, 'completed');
+INSERT INTO projects VALUES (3, 'Budget System', 3, 120000, 'active');
+INSERT INTO projects VALUES (4, 'API Gateway',   1,  90000, 'active');
 
-# ── Grader ────────────────────────────────────────────────────────────────────
+INSERT INTO employee_projects VALUES (1, 1, 'Lead',      320.0);
+INSERT INTO employee_projects VALUES (2, 1, 'Developer', 280.0);
+INSERT INTO employee_projects VALUES (5, 4, 'Lead',      200.0);
+INSERT INTO employee_projects VALUES (8, 4, 'Developer', 150.0);
+INSERT INTO employee_projects VALUES (3, 2, 'Lead',      400.0);
+INSERT INTO employee_projects VALUES (6, 2, 'Designer',  300.0);
+INSERT INTO employee_projects VALUES (4, 3, 'Lead',      250.0);
+INSERT INTO employee_projects VALUES (7, 3, 'Analyst',   180.0);
+"""
 
-def _normalise_sql(sql: str) -> str:
-    """Lower-case + collapse whitespace for rough comparison."""
-    return re.sub(r"\s+", " ", sql.strip().lower())
+SCHEMA_DESCRIPTION = """Tables in this database:
 
-
-def grade(task_id: str, submitted_sql: str) -> dict:
-    """
-    Grade *submitted_sql* against the expected result for *task_id*.
-
-    Returns a dict with:
-        score    float  — strictly in (0.01, 0.99)
-        feedback str
-        passed   bool
-    """
-    if task_id not in TASKS:
-        return {"score": 0.01, "feedback": f"Unknown task_id: {task_id!r}", "passed": False}
-
-    task      = TASKS[task_id]
-    expected  = task["expected_query"]
-    exp_cols  = task["expected_columns"]
-
-    conn = _make_db()
-
-    # ── Run expected query to get ground-truth rows ───────────────────────────
-    try:
-        exp_cursor = conn.execute(expected)
-        exp_rows   = [dict(r) for r in exp_cursor.fetchall()]
-        exp_cols_actual = set(exp_rows[0].keys()) if exp_rows else exp_cols
-    except Exception as exc:
-        conn.close()
-        return {"score": 0.01, "feedback": f"Internal error running expected query: {exc}", "passed": False}
-
-    # ── Run submitted query ───────────────────────────────────────────────────
-    error_message = ""
-    sub_rows: list[dict] = []
-    try:
-        sub_cursor = conn.execute(submitted_sql)
-        sub_rows   = [dict(r) for r in sub_cursor.fetchall()]
-        sub_cols   = set(sub_rows[0].keys()) if sub_rows else set()
-    except Exception as exc:
-        error_message = str(exc)
-        conn.close()
-        # Query didn't even run — give a small partial score for trying
-        return {
-            "score":   _clamp(0.05),
-            "feedback": f"Query execution failed: {error_message}",
-            "passed":  False,
-            "error":   error_message,
-        }
-    finally:
-        conn.close()
-
-    # ── Score components ──────────────────────────────────────────────────────
-    raw_score = 0.0
-
-    # +0.30  query executes without error (already passed the try/except above)
-    raw_score += 0.30
-
-    # +0.20  correct columns
-    if sub_cols and sub_cols == exp_cols_actual:
-        raw_score += 0.20
-        col_feedback = "✓ Correct columns."
-    else:
-        col_feedback = f"✗ Column mismatch. Got {sub_cols}, expected {exp_cols_actual}."
-
-    # +0.10  correct row count
-    if len(sub_rows) == len(exp_rows):
-        raw_score += 0.10
-        row_feedback = "✓ Correct row count."
-    else:
-        row_feedback = f"✗ Row count mismatch. Got {len(sub_rows)}, expected {len(exp_rows)}."
-
-    # +0.40  correct row values (partial credit per matching row)
-    if exp_rows:
-        matched = sum(1 for r in sub_rows if r in exp_rows)
-        value_score = 0.40 * (matched / len(exp_rows))
-        raw_score  += value_score
-        val_feedback = f"✓ {matched}/{len(exp_rows)} rows matched." if matched else "✗ No rows matched expected values."
-    else:
-        val_feedback = "No expected rows to compare."
-
-    passed   = raw_score >= 0.99        # perfect or near-perfect
-    feedback = f"{col_feedback} {row_feedback} {val_feedback}"
-
-    # ── Clamp to open interval (0.01, 0.99) ──────────────────────────────────
-    final_score = _clamp(raw_score)
-
-    return {
-        "score":    final_score,
-        "feedback": feedback.strip(),
-        "passed":   passed,
-        "error":    error_message,
-    }
-
-
-# ── Episode management ────────────────────────────────────────────────────────
-
-class SQLRepairEnvironment:
-    """Stateful environment instance for one episode."""
-
-    MAX_ATTEMPTS = 5
-    HINT_AFTER   = 2           # show hint after this many failed attempts
-
-    def __init__(self, task_id: str):
-        if task_id not in TASKS:
-            raise ValueError(f"Unknown task_id {task_id!r}. Choose from: {list(TASKS)}")
-        self.task        = TASKS[task_id]
-        self.episode_id  = str(uuid.uuid4())
-        self.step_count  = 0
-        self.done        = False
-        self.last_score  = 0.0
-        self.last_feedback = ""
-        self.last_error  = ""
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def reset(self) -> dict:
-        """Reset and return the initial observation."""
-        self.step_count    = 0
-        self.done          = False
-        self.last_score    = 0.0
-        self.last_feedback = ""
-        self.last_error    = ""
-        return self._observation(reward=None)
-
-    def step(self, sql_query: str, explanation: str = "") -> dict:
-        """Submit a fixed SQL query; returns StepResult-shaped dict."""
-        if self.done:
-            return {
-                "observation": self._observation(reward=self.last_score),
-                "reward":      _clamp(self.last_score),
-                "done":        True,
-            }
-
-        self.step_count += 1
-        result           = grade(self.task["task_id"], sql_query)
-
-        self.last_score    = result["score"]
-        self.last_feedback = result["feedback"]
-        self.last_error    = result.get("error", "")
-
-        # Episode ends on success or exhausted attempts
-        if result["passed"] or self.step_count >= self.MAX_ATTEMPTS:
-            self.done = True
-
-        reward = _clamp(self.last_score)
-        return {
-            "observation": self._observation(reward=reward),
-            "reward":      reward,
-            "done":        self.done,
-        }
-
-    def state(self) -> dict:
-        return {
-            "episode_id":   self.episode_id,
-            "step_count":   self.step_count,
-            "task_id":      self.task["task_id"],
-            "difficulty":   self.task["difficulty"],
-            "max_attempts": self.MAX_ATTEMPTS,
-            "last_score":   _clamp(self.last_score),
-            "completed":    self.done,
-        }
-
-    # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _observation(self, reward) -> dict:
-        hint = ""
-        if self.step_count >= self.HINT_AFTER and not self.done:
-            hint = (
-                "Hint: Compare the broken query carefully against the "
-                "task description and schema. Look for keyword typos, "
-                "wrong JOIN columns, or misplaced WHERE/HAVING clauses."
-            )
-
-        return {
-            "broken_query":     self.task["broken_query"],
-            "db_schema":        _DB_SCHEMA_TEXT,
-            "error_message":    self.last_error,
-            "task_description": self.task["task_description"],
-            "task_id":          self.task["task_id"],
-            "difficulty":       self.task["difficulty"],
-            "attempt_number":   self.step_count,
-            "max_attempts":     self.MAX_ATTEMPTS,
-            "feedback":         self.last_feedback,
-            "hint":             hint,
-            "reward":           _clamp(reward) if reward is not None else None,
-            "done":             self.done,
-        }
-
-
-_DB_SCHEMA_TEXT = """
 employees(id INTEGER, name TEXT, department TEXT, salary REAL, hire_date TEXT)
 departments(id INTEGER, name TEXT, budget REAL, location TEXT)
 projects(id INTEGER, name TEXT, department_id INTEGER, budget REAL, status TEXT)
 employee_projects(employee_id INTEGER, project_id INTEGER, role TEXT, hours_worked REAL)
-""".strip()
+
+Relationships:
+  employees.department  → matches departments.name
+  projects.department_id → references departments.id
+  employee_projects.employee_id → references employees.id
+  employee_projects.project_id  → references projects.id
+"""
+
+
+# ─── Task Definitions ─────────────────────────────────────────────────────────
+
+TASKS: Dict[str, Dict[str, Any]] = {
+
+    "easy": {
+        "id": "easy",
+        "difficulty": "easy",
+        "description": (
+            "Fix the syntax errors in this SQL query. "
+            "The query should return the name, department, and salary "
+            "of all Engineering employees earning more than $80,000, "
+            "ordered by salary descending."
+        ),
+        "broken_query": (
+            "SELCT name, department, salary "
+            "FORM employees "
+            "WERE department = 'Engineering' AND salary > 80000 "
+            "ORDR BY salary DESC"
+        ),
+        "expected_query": (
+            "SELECT name, department, salary "
+            "FROM employees "
+            "WHERE department = 'Engineering' AND salary > 80000 "
+            "ORDER BY salary DESC"
+        ),
+        "hint": (
+            "Look for misspelled SQL keywords. "
+            "Correct spellings: SELECT (not SELCT), FROM (not FORM), "
+            "WHERE (not WERE), ORDER BY (not ORDR BY)."
+        ),
+    },
+
+    "medium": {
+        "id": "medium",
+        "difficulty": "medium",
+        "description": (
+            "Fix the JOIN conditions in this query. "
+            "The query should return each employee's name, "
+            "the project they work on, and their hours worked — "
+            "ordered by employee name."
+        ),
+        "broken_query": (
+            "SELECT e.name, p.name AS project_name, ep.hours_worked\n"
+            "FROM employees e\n"
+            "JOIN employee_projects ep ON e.id = ep.project_id\n"
+            "JOIN projects p ON ep.employee_id = p.id\n"
+            "ORDER BY e.name"
+        ),
+        "expected_query": (
+            "SELECT e.name, p.name AS project_name, ep.hours_worked\n"
+            "FROM employees e\n"
+            "JOIN employee_projects ep ON e.id = ep.employee_id\n"
+            "JOIN projects p ON ep.project_id = p.id\n"
+            "ORDER BY e.name"
+        ),
+        "hint": (
+            "The JOIN column names are swapped on both JOIN lines. "
+            "employees links to employee_projects via employee_id (not project_id). "
+            "employee_projects links to projects via project_id (not employee_id)."
+        ),
+    },
+
+    "hard": {
+        "id": "hard",
+        "difficulty": "hard",
+        "description": (
+            "Fix the aggregation logic in this query. "
+            "The query should return each department's name, "
+            "employee count, and average salary — "
+            "but only for departments where the average salary exceeds $85,000, "
+            "ordered by average salary descending."
+        ),
+        "broken_query": (
+            "SELECT department, COUNT(*) AS emp_count, AVG(salary) AS avg_salary\n"
+            "FROM employees\n"
+            "GROUP BY department\n"
+            "WHERE AVG(salary) > 85000\n"
+            "ORDER BY avg_salary DESC"
+        ),
+        "expected_query": (
+            "SELECT department, COUNT(*) AS emp_count, AVG(salary) AS avg_salary\n"
+            "FROM employees\n"
+            "GROUP BY department\n"
+            "HAVING AVG(salary) > 85000\n"
+            "ORDER BY avg_salary DESC"
+        ),
+        "hint": (
+            "You cannot use WHERE with aggregate functions like AVG(). "
+            "WHERE filters individual rows before grouping. "
+            "To filter groups after aggregation, use HAVING instead."
+        ),
+    },
+}
+
+
+# ─── Database Helpers ─────────────────────────────────────────────────────────
+
+def create_db() -> sqlite3.Connection:
+    """Create a fresh in-memory SQLite database with seed data."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(DB_SCHEMA + DB_SEED)
+    return conn
+
+
+def run_query(
+    conn: sqlite3.Connection,
+    query: str
+) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    """
+    Execute a SQL query safely.
+    Returns (rows, None) on success, (None, error_message) on failure.
+    """
+    try:
+        cursor = conn.execute(query)
+        rows = [dict(row) for row in cursor.fetchall()]
+        return rows, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+# ─── Grader ───────────────────────────────────────────────────────────────────
+
+def _normalize_rows(rows: List[Dict]) -> List[tuple]:
+    """Convert rows to a sorted, comparable format (order-independent)."""
+    def normalize_val(v: Any) -> str:
+        if isinstance(v, float):
+            return str(round(v, 2))
+        return str(v)
+
+    normalized = [
+        tuple(sorted((k, normalize_val(v)) for k, v in row.items()))
+        for row in rows
+    ]
+    return sorted(normalized)
+
+
+def grade_submission(
+    task_id: str,
+    submitted_rows: Optional[List[Dict]],
+    error: Optional[str],
+    conn: sqlite3.Connection,
+) -> Tuple[float, str]:
+    """
+    Grade a submitted query against the expected result.
+
+    Scoring breakdown:
+      +0.30  query executes without error
+      +0.20  returned columns are correct
+      +0.10  row count matches expected
+      +0.40  all row values match exactly (partial credit for partial matches)
+
+    Returns (score: float 0.0–1.0, feedback: str)
+    """
+    task = TASKS[task_id]
+    feedback_parts: List[str] = []
+    score = 0.0
+
+    # ── Gate: did the query even run? ───────────────────────────────────────
+    if error is not None:
+        return 0.0, f"❌ Query failed to execute: {error}"
+
+    # ── Run expected query for ground truth ─────────────────────────────────
+    expected_rows, exp_err = run_query(conn, task["expected_query"])
+    if exp_err:
+        return 0.0, "Internal error running expected query."
+
+    # ── +0.30 Executes without error ────────────────────────────────────────
+    score += 0.30
+    feedback_parts.append("✅ Query executes without error (+0.30)")
+
+    # ── +0.20 Correct columns ───────────────────────────────────────────────
+    sub_cols = set(submitted_rows[0].keys()) if submitted_rows else set()
+    exp_cols = set(expected_rows[0].keys()) if expected_rows else set()
+
+    if sub_cols == exp_cols:
+        score += 0.20
+        feedback_parts.append("✅ Correct columns returned (+0.20)")
+    else:
+        missing = exp_cols - sub_cols
+        extra   = sub_cols - exp_cols
+        msg = "❌ Wrong columns."
+        if missing:
+            msg += f" Missing: {sorted(missing)}."
+        if extra:
+            msg += f" Unexpected: {sorted(extra)}."
+        feedback_parts.append(msg)
+
+    # ── +0.10 Correct row count ─────────────────────────────────────────────
+    sub_count = len(submitted_rows) if submitted_rows else 0
+    exp_count = len(expected_rows) if expected_rows else 0
+
+    if sub_count == exp_count:
+        score += 0.10
+        feedback_parts.append(f"✅ Correct row count: {exp_count} rows (+0.10)")
+    else:
+        feedback_parts.append(
+            f"❌ Wrong row count: got {sub_count}, expected {exp_count}"
+        )
+
+    # ── +0.40 Row values match ──────────────────────────────────────────────
+    if submitted_rows and expected_rows:
+        sub_norm = _normalize_rows(submitted_rows)
+        exp_norm = _normalize_rows(expected_rows)
+
+        if sub_norm == exp_norm:
+            score += 0.40
+            feedback_parts.append("✅ All row values match exactly! (+0.40)")
+        elif sub_count == exp_count:
+            # Partial credit: count matching rows
+            matching = sum(1 for s, e in zip(sub_norm, exp_norm) if s == e)
+            partial  = (matching / exp_count) * 0.40
+            score   += partial
+            feedback_parts.append(
+                f"⚠️  Partial row match: {matching}/{exp_count} rows correct "
+                f"(+{partial:.2f})"
+            )
+        else:
+            feedback_parts.append("❌ Row values do not match expected output.")
+
+    score = min(1.0, round(score, 4))
+    return score, " | ".join(feedback_parts)
+
+
+# ─── Environment ──────────────────────────────────────────────────────────────
+
+class SQLRepairEnvironment(Environment):
+    """
+    SQL Query Repair Environment.
+
+    An AI agent is given a broken SQL query and must fix it.
+    Three tasks of increasing difficulty cover real-world bug categories:
+
+      easy   — Syntax errors    (typos in SQL keywords)
+      medium — Logic errors     (wrong JOIN column references)
+      hard   — Semantic errors  (WHERE vs HAVING with aggregates)
+
+    Episode flow:
+      1. reset(task_id="easy"|"medium"|"hard")  →  broken query + schema
+      2. step(SQLAction(sql_query="..."))        →  grader feedback + partial reward
+      3. Repeat until done=True (score=1.0 or max attempts reached)
+    """
+
+    SUPPORTS_CONCURRENT_SESSIONS = True
+    MAX_ATTEMPTS = 5
+
+    def __init__(self):
+        self._state      = SQLState()
+        self._task: Optional[Dict]               = None
+        self._conn: Optional[sqlite3.Connection] = None
+        self._attempt    = 0
+        self._last_score = 0.0
+
+    # ── reset ────────────────────────────────────────────────────────────────
+
+    def reset(
+        self,
+        seed=None,
+        episode_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        **kwargs,
+    ) -> SQLObservation:
+        """
+        Start a new episode.
+
+        Args:
+            task_id: "easy", "medium", or "hard".
+                     Random task selected if omitted.
+        """
+        # Select task
+        if task_id and task_id in TASKS:
+            self._task = TASKS[task_id]
+        else:
+            self._task = random.choice(list(TASKS.values()))
+
+        # Fresh database for this episode
+        if self._conn:
+            self._conn.close()
+        self._conn   = create_db()
+        self._attempt    = 0
+        self._last_score = 0.0
+
+        self._state = SQLState(
+            episode_id   = episode_id or str(uuid.uuid4()),
+            step_count   = 0,
+            task_id      = self._task["id"],
+            difficulty   = self._task["difficulty"],
+            max_attempts = self.MAX_ATTEMPTS,
+            last_score   = 0.0,
+            completed    = False,
+        )
+
+        return SQLObservation(
+            done             = False,
+            reward           = 0.0,
+            broken_query     = self._task["broken_query"],
+            db_schema        = SCHEMA_DESCRIPTION,
+            error_message    = "",
+            task_description = self._task["description"],
+            task_id          = self._task["id"],
+            difficulty       = self._task["difficulty"],
+            attempt_number   = 0,
+            max_attempts     = self.MAX_ATTEMPTS,
+            feedback         = "Episode started. Submit your fixed SQL query.",
+            hint             = "",
+        )
+
+    # ── step ─────────────────────────────────────────────────────────────────
+
+    def step(
+        self,
+        action: SQLAction,
+        timeout_s=None,
+        **kwargs,
+    ) -> SQLObservation:
+        """
+        Submit a fixed SQL query.
+
+        The grader runs the query, compares results to expected,
+        and returns a score with detailed feedback.
+        """
+        self._attempt         += 1
+        self._state.step_count += 1
+
+        # Run submitted query
+        rows, error = run_query(self._conn, action.sql_query)
+
+        # Grade it
+        score, feedback = grade_submission(
+            self._task["id"], rows, error, self._conn
+        )
+        self._last_score      = score
+        self._state.last_score = score
+
+        # Episode ends when solved or out of attempts
+        done = (score >= 1.0) or (self._attempt >= self.MAX_ATTEMPTS)
+        self._state.completed = score >= 1.0
+
+        # Reward shaping:
+        #   - Intermediate steps: return current score (partial progress signal)
+        #   - Terminal step with perfect score: 1.0
+        #   - Terminal step after exhausting attempts: slight penalty
+        if done and score < 1.0 and self._attempt >= self.MAX_ATTEMPTS:
+            reward = round(score * 0.85, 4)   # Penalty for using all attempts
+        else:
+            reward = score                     # Full score at every step
+
+        # Reveal hint after 2 failed attempts
+        hint = ""
+        if self._attempt >= 2 and score < 0.5:
+            hint = self._task["hint"]
+
+        return SQLObservation(
+            done             = done,
+            reward           = reward,
+            broken_query     = self._task["broken_query"],
+            db_schema        = SCHEMA_DESCRIPTION,
+            error_message    = error or "",
+            task_description = self._task["description"],
+            task_id          = self._task["id"],
+            difficulty       = self._task["difficulty"],
+            attempt_number   = self._attempt,
+            max_attempts     = self.MAX_ATTEMPTS,
+            feedback         = feedback,
+            hint             = hint,
+        )
+
+    # ── state ─────────────────────────────────────────────────────────────────
+
+    @property
+    def state(self) -> SQLState:
+        """Return current episode metadata."""
+        return self._state
+
+    # ── helpers (used by app.py extra endpoints) ──────────────────────────────
+
+    def get_last_score(self) -> float:
+        return self._last_score
+
+    def get_current_task(self) -> Dict:
+        return self._task or {}
+
+    @staticmethod
+    def list_tasks() -> List[Dict]:
+        """Return all task definitions for the /tasks endpoint."""
+        return [
+            {
+                "task_id":     t["id"],
+                "difficulty":  t["difficulty"],
+                "description": t["description"],
+                "action_schema": {
+                    "sql_query":   "string — Your fixed SQL query",
+                    "explanation": "string (optional) — Your reasoning",
+                },
+            }
+            for t in TASKS.values()
+        ]
+
+    @staticmethod
+    def run_grader(task_id: str, sql_query: str) -> Dict:
+        """
+        Standalone grader — used by the /grader endpoint.
+        Creates a fresh DB, runs the query, and returns the score.
+        """
+        if task_id not in TASKS:
+            return {"error": f"Unknown task_id: {task_id}. Choose: easy, medium, hard"}
+
+        conn = create_db()
+        rows, error = run_query(conn, sql_query)
+        score, feedback = grade_submission(task_id, rows, error, conn)
+        conn.close()
+
+        return {
+            "task_id":  task_id,
+            "score":    score,
+            "feedback": feedback,
+            "passed":   score >= 1.0,
+        }
