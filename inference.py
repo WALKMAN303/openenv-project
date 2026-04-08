@@ -1,6 +1,6 @@
 """
 inference.py - SQL Repair Environment Baseline Agent
-Must be at repo root. Follows OpenEnv submission format exactly.
+Must be at repo root. Uses validator-injected API_BASE_URL and API_KEY.
 """
 
 import os
@@ -14,21 +14,22 @@ from openai import OpenAI
 from client import SQLRepairEnv
 from models import SQLAction
 
-# ── Required environment variables ───────────────────────────────────────────
+# ── Environment variables — injected by validator ─────────────────────────────
+# DO NOT hardcode or add fallback for API_KEY — must use validator's proxy
 API_BASE_URL     = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME       = os.getenv("MODEL_NAME",   "llama-3.1-8b-instant")
+API_KEY          = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
 HF_TOKEN         = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-# Space URL — where the environment is running
 SPACE_URL = os.getenv("SPACE_URL", "https://open-env-project-sql-repair-env.hf.space")
 BENCHMARK = "sql-repair-env"
 TASK_IDS  = ["easy", "medium", "hard"]
 MAX_STEPS = 5
 
-# ── OpenAI client configured via environment variables ────────────────────────
+# ── OpenAI client — MUST use API_BASE_URL and API_KEY from environment ────────
 client = OpenAI(
-    api_key=HF_TOKEN or os.getenv("OPENAI_API_KEY", ""),
+    api_key=API_KEY,
     base_url=API_BASE_URL,
 )
 
@@ -49,8 +50,8 @@ def log_start(task: str, env: str, model: str) -> None:
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    error_val   = error if error else "null"
-    done_val    = str(done).lower()
+    error_val    = error if error else "null"
+    done_val     = str(done).lower()
     action_clean = action.replace("\n", " ")[:60]
     print(
         f"[STEP] step={step} action={action_clean!r} reward={reward:.2f} done={done_val} error={error_val}",
@@ -92,7 +93,6 @@ def run_task(env, task_id: str) -> float:
     score:       float       = 0.0
     success:     bool        = False
 
-    # ── PRINT [START] IMMEDIATELY ─────────────────────────────────────────────
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
@@ -106,6 +106,7 @@ def run_task(env, task_id: str) -> float:
             prompt = build_prompt(obs)
 
             try:
+                # All LLM calls go through API_BASE_URL proxy
                 response = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[
@@ -121,24 +122,16 @@ def run_task(env, task_id: str) -> float:
                 fixed_query = obs.broken_query
                 print(f"[DEBUG] LLM error: {e}", flush=True)
 
-            result = env.step(SQLAction(sql_query=fixed_query))
-            obs    = result.observation
-
-            reward = result.reward or 0.0
-            done   = result.done
-            error  = obs.error_message if obs.error_message else None
+            result      = env.step(SQLAction(sql_query=fixed_query))
+            obs         = result.observation
+            reward      = result.reward or 0.0
+            done        = result.done
+            error       = obs.error_message if obs.error_message else None
 
             rewards.append(reward)
             steps_taken = step
 
-            # ── PRINT [STEP] EVERY STEP ───────────────────────────────────────
-            log_step(
-                step=step,
-                action=fixed_query,
-                reward=reward,
-                done=done,
-                error=error,
-            )
+            log_step(step=step, action=fixed_query, reward=reward, done=done, error=error)
 
             if done:
                 break
@@ -153,36 +146,33 @@ def run_task(env, task_id: str) -> float:
         success = False
 
     finally:
-        # ── PRINT [END] ALWAYS ────────────────────────────────────────────────
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return score
 
 
 def main():
-    print(f"[DEBUG] Starting inference", flush=True)
     print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
     print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
     print(f"[DEBUG] SPACE_URL={SPACE_URL}", flush=True)
+    print(f"[DEBUG] API_KEY present={bool(API_KEY)}", flush=True)
 
     all_scores = {}
 
     try:
         with SQLRepairEnv(base_url=SPACE_URL).sync() as env:
             for task_id in TASK_IDS:
-                score = 0.0
                 try:
                     score = run_task(env, task_id)
                 except Exception as e:
                     print(f"[DEBUG] Task {task_id} failed: {e}", flush=True)
-                    # Still print START and END even on failure
                     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
                     log_end(success=False, steps=0, score=0.0, rewards=[0.0])
+                    score = 0.0
                 all_scores[task_id] = score
 
     except Exception as e:
         print(f"[DEBUG] Connection failed: {e}", flush=True)
-        # Print required output even if connection fails
         for task_id in TASK_IDS:
             log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
             log_end(success=False, steps=0, score=0.0, rewards=[0.0])
