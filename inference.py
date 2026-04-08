@@ -1,6 +1,6 @@
 """
 inference.py - SQL Repair Environment Baseline Agent
-Uses validator-injected API_BASE_URL and API_KEY with no fallbacks.
+Follows sample inference.py exactly.
 """
 
 import os
@@ -14,10 +14,10 @@ from openai import OpenAI
 from client import SQLRepairEnv
 from models import SQLAction
 
-# ── MUST use validator-injected variables — NO hardcoded fallbacks ────────────
-API_BASE_URL     = os.environ["API_BASE_URL"]
-API_KEY          = os.environ["API_KEY"]
-MODEL_NAME       = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+# ── Exact same pattern as sample inference.py ─────────────────────────────────
+API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME   = os.getenv("MODEL_NAME")   or "Qwen/Qwen2.5-72B-Instruct"
 HF_TOKEN         = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
@@ -26,7 +26,7 @@ BENCHMARK = "sql-repair-env"
 TASK_IDS  = ["easy", "medium", "hard"]
 MAX_STEPS = 5
 
-# ── OpenAI client — MUST use API_BASE_URL and API_KEY from environment ────────
+# ── OpenAI client — uses HF router proxy ──────────────────────────────────────
 client = OpenAI(
     api_key=API_KEY,
     base_url=API_BASE_URL,
@@ -109,8 +109,9 @@ def run_task(env, task_id: str) -> float:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user",   "content": prompt},
                     ],
-                    temperature=0.0,
+                    temperature=0.7,
                     max_tokens=500,
+                    stream=False,
                 )
                 fixed_query = response.choices[0].message.content.strip()
                 fixed_query = fixed_query.replace("```sql", "").replace("```", "").strip()
