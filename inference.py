@@ -1,6 +1,5 @@
 """
 inference.py - SQL Repair Environment Baseline Agent
-Follows sample inference.py exactly.
 """
 
 import os
@@ -14,10 +13,7 @@ from openai import OpenAI
 from client import SQLRepairEnv
 from models import SQLAction
 
-# ── Exact same pattern as sample inference.py ─────────────────────────────────
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME   = os.getenv("MODEL_NAME")   or "Qwen/Qwen2.5-72B-Instruct"
+# ── Read env vars (NOT at module level — inside main()) ───────────────────────
 HF_TOKEN         = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
@@ -25,12 +21,6 @@ SPACE_URL = os.getenv("SPACE_URL", "https://open-env-project-sql-repair-env.hf.s
 BENCHMARK = "sql-repair-env"
 TASK_IDS  = ["easy", "medium", "hard"]
 MAX_STEPS = 5
-
-# ── OpenAI client — uses HF router proxy ──────────────────────────────────────
-client = OpenAI(
-    api_key=API_KEY,
-    base_url=API_BASE_URL,
-)
 
 SYSTEM_PROMPT = """You are an expert SQL developer who fixes broken SQL queries.
 Return ONLY the corrected SQL query. No explanation, no markdown, no code blocks.
@@ -84,13 +74,13 @@ def build_prompt(obs) -> str:
     return "\n".join(parts)
 
 
-def run_task(env, task_id: str) -> float:
+def run_task(env, client, model_name: str, task_id: str) -> float:
     rewards:     List[float] = []
     steps_taken: int         = 0
     score:       float       = 0.0
     success:     bool        = False
 
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_id, env=BENCHMARK, model=model_name)
 
     try:
         result = env.reset(task_id=task_id)
@@ -102,22 +92,19 @@ def run_task(env, task_id: str) -> float:
 
             prompt = build_prompt(obs)
 
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=500,
-                    stream=False,
-                )
-                fixed_query = response.choices[0].message.content.strip()
-                fixed_query = fixed_query.replace("```sql", "").replace("```", "").strip()
-            except Exception as e:
-                fixed_query = obs.broken_query
-                print(f"[DEBUG] LLM error: {e}", flush=True)
+            # LLM call — NOT caught, must go through proxy
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=500,
+                stream=False,
+            )
+            fixed_query = response.choices[0].message.content.strip()
+            fixed_query = fixed_query.replace("```sql", "").replace("```", "").strip()
 
             result      = env.step(SQLAction(sql_query=fixed_query))
             obs         = result.observation
@@ -139,6 +126,8 @@ def run_task(env, task_id: str) -> float:
 
     except Exception as e:
         print(f"[DEBUG] Task error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         score   = 0.0
         success = False
 
@@ -149,30 +138,36 @@ def run_task(env, task_id: str) -> float:
 
 
 def main():
-    print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
-    print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
+    # ── Initialize everything inside main() ───────────────────────────────────
+    # Strict env var access — exactly as validator requires
+    api_base_url = os.environ["API_BASE_URL"]
+    api_key      = os.environ["API_KEY"]
+    model_name   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+
+    print(f"[DEBUG] API_BASE_URL={api_base_url}", flush=True)
+    print(f"[DEBUG] MODEL_NAME={model_name}", flush=True)
     print(f"[DEBUG] SPACE_URL={SPACE_URL}", flush=True)
-    print(f"[DEBUG] API_KEY present={bool(API_KEY)}", flush=True)
+    print(f"[DEBUG] API_KEY present={bool(api_key)}", flush=True)
+    print(f"[DEBUG] API_KEY prefix={api_key[:8] if api_key else 'MISSING'}", flush=True)
+
+    # ── Client initialized inside main() after env vars confirmed ─────────────
+    client = OpenAI(
+        base_url=api_base_url,
+        api_key=api_key,
+    )
 
     all_scores = {}
 
-    try:
-        with SQLRepairEnv(base_url=SPACE_URL).sync() as env:
-            for task_id in TASK_IDS:
-                try:
-                    score = run_task(env, task_id)
-                except Exception as e:
-                    print(f"[DEBUG] Task {task_id} failed: {e}", flush=True)
-                    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-                    log_end(success=False, steps=0, score=0.0, rewards=[0.0])
-                    score = 0.0
-                all_scores[task_id] = score
-
-    except Exception as e:
-        print(f"[DEBUG] Connection failed: {e}", flush=True)
+    with SQLRepairEnv(base_url=SPACE_URL).sync() as env:
         for task_id in TASK_IDS:
-            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-            log_end(success=False, steps=0, score=0.0, rewards=[0.0])
+            try:
+                score = run_task(env, client, model_name, task_id)
+            except Exception as e:
+                print(f"[DEBUG] Task {task_id} failed: {e}", flush=True)
+                log_start(task=task_id, env=BENCHMARK, model=model_name)
+                log_end(success=False, steps=0, score=0.0, rewards=[0.0])
+                score = 0.0
+            all_scores[task_id] = score
 
     avg = sum(all_scores.values()) / len(all_scores) if all_scores else 0.0
     print(f"[SUMMARY] scores={all_scores} average={avg:.2f}", flush=True)
