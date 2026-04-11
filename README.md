@@ -1,4 +1,4 @@
-# SQL Repair Environment v4
+# SQL Repair Environment
 
 A production-grade OpenEnv environment where AI agents learn to diagnose and fix broken SQL queries through multi-turn agentic interaction with a live relational database.
 
