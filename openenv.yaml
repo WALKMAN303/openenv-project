@@ -1,85 +1,85 @@
 name: sql_repair_env
-version: "1.0.0"
+version: "3.0.0"
 description: >
   Real-world SQL query repair environment for AI agent training.
-  An agent is given a broken SQL query and must fix it to match
-  expected output against a SQLite database.
+  20 tasks across 3 difficulty levels covering all major SQL bug categories:
+  syntax errors, JOIN mistakes, WHERE vs HAVING, subquery bugs, self-joins,
+  GROUP BY violations, duplicate counting, and complex multi-table queries.
+  Features anti-hack reward shaping and rich partial-credit grading.
 
-author: "Your Team Name"
+author: "WALKMAN303"
 tags:
   - openenv
   - sql
   - developer-tools
   - code-repair
   - real-world
+  - reinforcement-learning
 
 tasks:
-  - id: easy
-    description: "Fix SQL syntax errors (misspelled keywords)"
-    difficulty: easy
-    max_attempts: 5
-    scoring: "0.0–1.0 partial credit"
-
-  - id: medium
-    description: "Fix wrong JOIN column references"
-    difficulty: medium
-    max_attempts: 5
-    scoring: "0.0–1.0 partial credit"
-
-  - id: hard
-    description: "Fix wrong aggregation logic (WHERE vs HAVING)"
-    difficulty: hard
-    max_attempts: 5
-    scoring: "0.0–1.0 partial credit"
+  - {id: easy_1,   difficulty: easy,   description: "Fix keyword typos: SELCT, FORM, WERE, ORDR BY"}
+  - {id: easy_2,   difficulty: easy,   description: "Fix ORER BY typo in department query"}
+  - {id: easy_3,   difficulty: easy,   description: "Fix CONT and GROUB BY typos"}
+  - {id: easy_4,   difficulty: easy,   description: "Fix SELCT and FEOM typos"}
+  - {id: easy_5,   difficulty: easy,   description: "Fix WHER and ORDER BE typos"}
+  - {id: easy_6,   difficulty: easy,   description: "Fix SELEC and FORM typos in SUM query"}
+  - {id: easy_7,   difficulty: easy,   description: "Fix DESTINCT, FORM, ORDRE BY typos"}
+  - {id: medium_1, difficulty: medium, description: "Fix swapped JOIN columns in employee-project query"}
+  - {id: medium_2, difficulty: medium, description: "Fix WHERE vs HAVING with AVG()"}
+  - {id: medium_3, difficulty: medium, description: "Fix wrong JOIN column project-department"}
+  - {id: medium_4, difficulty: medium, description: "Fix MAX vs AVG in correlated subquery"}
+  - {id: medium_5, difficulty: medium, description: "Fix wrong JOIN column employee-sales"}
+  - {id: medium_6, difficulty: medium, description: "Fix wrong JOIN in performance review query"}
+  - {id: medium_7, difficulty: medium, description: "Fix WHERE vs HAVING with SUM()"}
+  - {id: hard_1,   difficulty: hard,   description: "Fix LEFT JOIN vs INNER JOIN with WHERE filter"}
+  - {id: hard_2,   difficulty: hard,   description: "Fix self-join for employee-manager"}
+  - {id: hard_3,   difficulty: hard,   description: "Fix GROUP BY with non-aggregated SELECT column"}
+  - {id: hard_4,   difficulty: hard,   description: "Fix WHERE vs HAVING with SUM() in sales"}
+  - {id: hard_5,   difficulty: hard,   description: "Fix multi-table join with duplicate counting"}
+  - {id: hard_6,   difficulty: hard,   description: "Fix WHERE vs HAVING with COUNT() > 1"}
 
 observation_space:
-  broken_query:     "string — the broken SQL query to fix"
-  schema:           "string — database schema description"
-  error_message:    "string — SQL execution error from last attempt"
-  task_description: "string — what the query should do"
-  task_id:          "string — easy | medium | hard"
-  difficulty:       "string — easy | medium | hard"
-  attempt_number:   "int — current attempt (0 = just reset)"
-  max_attempts:     "int — maximum allowed attempts (5)"
-  feedback:         "string — detailed grader feedback"
-  hint:             "string — appears after 2 failed attempts"
+  broken_query:      "string - the broken SQL query"
+  db_schema:         "string - database schema"
+  error_message:     "string - last SQL execution error"
+  task_description:  "string - what the query should do"
+  task_id:           "string - task identifier"
+  difficulty:        "string - easy | medium | hard"
+  attempt_number:    "int - current attempt"
+  max_attempts:      "int - max allowed (5)"
+  feedback:          "string - detailed grader feedback"
+  hint:              "string - hint after 2 failed attempts"
+  expected_columns:  "list - expected output column names"
+  expected_row_count: "int - expected row count"
 
 action_space:
-  sql_query:    "string (required) — your fixed SQL query"
-  explanation:  "string (optional) — your reasoning"
+  sql_query:    "string (required) - corrected SQL query"
+  explanation:  "string (optional) - reasoning"
 
 reward:
   type: continuous
-  range: [0.0, 1.0]
-  shaping:
+  range: [0.001, 0.999]
+  components:
     - "+0.30 query executes without error"
-    - "+0.20 correct columns returned"
+    - "+0.20 correct output columns"
     - "+0.10 correct row count"
-    - "+0.40 all row values match (partial credit for partial matches)"
-    - "×0.85 penalty for exhausting all attempts"
+    - "+0.40 all values match (partial credit for partial matches)"
+  penalties:
+    - "score=0.001 if submitting original broken query unchanged"
+    - "score=0.001 if submitting exact duplicate of previous attempt"
+    - "x0.85 if exhausting all 5 attempts without solving"
 
 endpoints:
-  - path: /reset
-    method: POST
-    description: Start a new episode
-  - path: /step
-    method: POST
-    description: Submit a fixed SQL query
-  - path: /state
-    method: GET
-    description: Get current episode metadata
-  - path: /tasks
-    method: GET
-    description: List all tasks with action schema
-  - path: /grader
-    method: POST
-    description: Grade a query without running a full episode
-  - path: /baseline
-    method: GET
-    description: Run oracle baseline and return scores for all 3 tasks
-  - path: /health
-    method: GET
-    description: Health check
+  - {path: /, method: GET, description: "Interactive UI"}
+  - {path: /reset, method: POST, description: "Start episode"}
+  - {path: /step, method: POST, description: "Submit SQL fix"}
+  - {path: /state, method: GET, description: "Episode metadata"}
+  - {path: /tasks, method: GET, description: "List all 20 tasks"}
+  - {path: /grader, method: POST, description: "Grade without episode"}
+  - {path: /baseline, method: GET, description: "Oracle baseline scores"}
+  - {path: /health, method: GET, description: "Health check"}
+  - {path: /info, method: GET, description: "Environment info"}
+  - {path: /docs, method: GET, description: "API documentation"}
 
 runtime:
   framework: FastAPI + OpenEnv
