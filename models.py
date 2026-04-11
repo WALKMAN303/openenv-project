@@ -1,74 +1,46 @@
 """
-models.py — Type-safe data contracts for the SQL Repair Environment.
-
-Every field is documented. Your IDE will autocomplete everything.
+models.py - Type-safe data contracts for SQL Repair Environment v3.
+Uses Field() descriptors matching reference environment pattern exactly.
 """
 
 from typing import Optional, List
+from pydantic import Field
 from openenv.core.env_server import Action, Observation, State
 
 
 class SQLAction(Action):
-    """
-    The action an AI agent takes: submit a (hopefully fixed) SQL query.
-
-    Fields:
-        sql_query   : The fixed SQL query the agent wants to run.
-        explanation : Optional reasoning — useful for debugging agent behaviour.
-    """
-    sql_query: str
-    explanation: str = ""
+    """Action: submit a fixed SQL query."""
+    sql_query: str = Field(..., description="The corrected SQL query to execute")
+    explanation: str = Field(default="", description="Optional agent reasoning")
 
 
 class SQLObservation(Observation):
     """
-    What the agent sees after reset() or step().
-
-    Inherited from Observation base:
-        done   : bool              — True when the episode is over.
-        reward : Optional[float]   — Score 0.0–1.0 at every step.
-
-    Custom fields:
-        broken_query     : The original broken SQL query the agent must fix.
-        db_schema        : Human-readable description of available tables/columns.
-        error_message    : SQL execution error from the last step (empty if no error).
-        task_description : Natural-language description of what the query should do.
-        task_id          : "easy" | "medium" | "hard"
-        difficulty       : Same as task_id — for clarity.
-        attempt_number   : How many step() calls have been made this episode.
-        max_attempts     : Maximum allowed attempts before episode ends.
-        feedback         : Detailed grader feedback on the last submission.
-        hint             : Appears after 2 failed attempts to guide the agent.
+    Observation returned after reset() or step().
+    done and reward are inherited from Observation base.
     """
-    broken_query: str
-    db_schema: str
-    error_message: str = ""
-    task_description: str = ""
-    task_id: str = ""
-    difficulty: str = ""
-    attempt_number: int = 0
-    max_attempts: int = 5
-    feedback: str = ""
-    hint: str = ""
+    broken_query: str = Field(..., description="The broken SQL query to fix")
+    db_schema: str = Field(..., description="Database schema - table and column definitions")
+    error_message: str = Field(default="", description="SQL execution error from last attempt")
+    task_description: str = Field(default="", description="What the fixed query should return")
+    task_id: str = Field(default="", description="Task identifier")
+    difficulty: str = Field(default="", description="easy | medium | hard")
+    attempt_number: int = Field(default=0, description="Current attempt number")
+    max_attempts: int = Field(default=5, description="Maximum allowed attempts")
+    feedback: str = Field(default="", description="Detailed grader feedback")
+    hint: str = Field(default="", description="Hint revealed after 2 failed attempts")
+    expected_columns: List[str] = Field(default_factory=list, description="Expected output column names")
+    expected_row_count: int = Field(default=-1, description="Expected number of rows (-1 = unknown)")
 
 
 class SQLState(State):
     """
     Episode metadata returned by state().
-
-    Inherited from State base:
-        episode_id : Optional[str]  — Unique episode identifier.
-        step_count : int            — Total steps taken this episode.
-
-    Custom fields:
-        task_id    : Which task is running.
-        difficulty : Difficulty level of the current task.
-        max_attempts : Maximum steps allowed.
-        last_score   : Score from the most recent step.
-        completed    : True if agent achieved score >= 1.0.
+    episode_id and step_count are inherited from State base.
     """
-    task_id: str = ""
-    difficulty: str = ""
-    max_attempts: int = 5
-    last_score: float = 0.0
-    completed: bool = False
+    task_id: str = Field(default="", description="Current task identifier")
+    difficulty: str = Field(default="", description="Task difficulty level")
+    max_attempts: int = Field(default=5, description="Maximum steps per episode")
+    last_score: float = Field(default=0.001, description="Score from most recent step")
+    completed: bool = Field(default=False, description="True if agent achieved perfect score")
+    attempts_used: int = Field(default=0, description="Number of attempts used so far")
