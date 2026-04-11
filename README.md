@@ -1,20 +1,3 @@
----
-title: SQL Repair Environment
-emoji: 🔧
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
-tags:
-  - openenv
-  - reinforcement-learning
-  - sql
-  - developer-tools
-  - real-world
-  - multi-turn
-  - agentic
----
-
 # SQL Repair Environment v4
 
 A production-grade OpenEnv environment where AI agents learn to diagnose and fix broken SQL queries through multi-turn agentic interaction with a live relational database.
@@ -326,7 +309,7 @@ sql-repair-env/
 
 ## Links
 
-- GitHub: https://github.com/WALKMAN303/sql-repair-env  
+- GitHub: https://github.com/arjunkr303/openenv-project
 - HF Space: https://huggingface.co/spaces/WALKMAN303/sql-repair-env  
 - Live API: https://WALKMAN303-sql-repair-env.hf.space/docs  
 - OpenEnv: https://github.com/meta-pytorch/OpenEnv
