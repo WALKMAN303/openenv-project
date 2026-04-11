@@ -1,18 +1,4 @@
-"""
-server/environment.py - SQL Repair Environment v3
 
-20 tasks across 3 difficulty levels:
-  Easy   (7): Syntax typos, keyword errors
-  Medium (7): JOIN errors, wrong clauses, subquery bugs
-  Hard   (6): Aggregation, window functions, CTEs, complex multi-table
-
-Features:
-  - Anti-hack reward shaping (penalizes trivial/repeated queries)
-  - Rich partial-credit grader (4 components + bonuses)
-  - Hint system (reveals after 2 failed attempts)
-  - Episode-level deduplication (penalizes submitting same query twice)
-  - Extended schema with 6 tables for richer task variety
-"""
 
 import sqlite3
 import uuid
