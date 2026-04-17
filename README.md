@@ -310,6 +310,5 @@ sql-repair-env/
 ## Links
 
 - GitHub: https://github.com/arjunkr303/openenv-project
-- HF Space: https://huggingface.co/spaces/WALKMAN303/sql-repair-env  
-- Live API: https://WALKMAN303-sql-repair-env.hf.space/docs  
+- HF Space: https://huggingface.co/spaces/arjunkr303/sql-repair-env  
 - OpenEnv: https://github.com/meta-pytorch/OpenEnv
